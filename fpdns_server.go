@@ -238,7 +238,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 				}
 				cname_target = dns.Fqdn(cname_target + "." + CONFIG_SLD)
 				cname_redir := &dns.NS{
-					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
 					Ns:  cname_target,
 				}
 				m.Answer = append(m.Answer, cname_redir)
