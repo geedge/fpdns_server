@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
+	"time"
 
 	"fpdns_server/datastruct"
 
@@ -74,6 +74,10 @@ func task_parser(name string, qtype uint16) int8 {
 			return 11
 		} else if strings.Contains(subdomain, "timeout") {
 			return 12
+		} else if strings.Contains(subdomain, "recursion") {
+			return 13
+		} else if strings.Contains(subdomain, "maxq") {
+			return 14 // max recursion queries
 		}
 	}
 	return -1
@@ -103,7 +107,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 			_, task_existed := datastruct.Task_map[random_token]
 			if !init_existed && !task_existed {
 				datastruct.Init_set[random_token] = struct{}{}
-				//fmt.Printf("test initialized (token = %v)\n", random_token)
+				fmt.Printf("test initialized (token = %v)\n", random_token)
 				break
 			}
 		}
@@ -128,7 +132,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 		if ok {
 			delete(datastruct.Init_set, token)
 			datastruct.Task_map[token] = &datastruct.ResolverFp{}
-			//fmt.Printf("Task Created (token = %v)\n", token)
+			fmt.Printf("Task Created (token = %v)\n", token)
 			if r.IsEdns0() != nil {
 				datastruct.Task_map[token].Dnssec = r.IsEdns0().Do()
 			}
@@ -158,7 +162,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 			delete(datastruct.Task_map, token)
 			datastruct.Result_map[token] = *result
 			reply_code = "200.200.200.200"
-			//fmt.Printf("Task terminated (token = %v)\n", token)
+			fmt.Printf("Task terminated (token = %v)\n", token)
 		} else {
 			m.MsgHdr.Rcode = dns.RcodeServerFailure
 			break
@@ -190,7 +194,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if fp, ok := datastruct.Task_map[token]; ok {
 			fp.QueryMerge += 1
-			//fmt.Printf("MergeTest (token = %v) current_status: %v\n", token, fp.QueryMerge)
+			fmt.Printf("MergeTest (token = %v) current_status: %v\n", token, fp.QueryMerge)
 		}
 	case 7:
 		respond_flag = false
@@ -200,7 +204,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if fp, ok := datastruct.Task_map[token]; ok {
 			fp.FetchLimit += 1
-			//fmt.Printf("FetchTest (token = %v) current_status: %v\n", token, fp.FetchLimit)
+			fmt.Printf("FetchTest (token = %v) current_status: %v\n", token, fp.FetchLimit)
 		}
 	case 8:
 		wrong_ns := &dns.NS{
@@ -216,55 +220,115 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 	case 9:
 		var cname_target string
 		token, err := retrieve_token(subdomain)
-		labels := strings.Split(subdomain, "-")
-		if labels[0] == "cname" {
-			cname_target = "1-" + subdomain
+		if err == nil {
+			if fp, ok := datastruct.Task_map[token]; ok {
+				labels := strings.Split(subdomain, "-")
+				if labels[0] == "cname" {
+					cname_target = "1-" + subdomain
+				} else {
+					iter_cnt, err := strconv.Atoi(labels[0])
+					if err == nil {
+						if iter_cnt > fp.MaxNsDepth {
+							fp.MaxNsDepth = iter_cnt
+							fmt.Printf("CnameChainTest (token = %v) status_update: %v\n", token, fp.MaxCnameDepth)
+						}
+					}
+					iter_cnt += 1
+					cname_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
+				}
+				cname_target = dns.Fqdn(cname_target + "." + CONFIG_SLD)
+				cname_redir := &dns.NS{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
+					Ns:  cname_target,
+				}
+				m.Answer = append(m.Answer, cname_redir)
+			} else {
+				m.Rcode = dns.RcodeNameError
+			}
 		} else {
-			iter_cnt, _ := strconv.Atoi(labels[0])
-			if err == nil {
-				if fp, ok := datastruct.Task_map[token]; ok {
-					if iter_cnt > fp.MaxCnameDepth {
-						fp.MaxCnameDepth = iter_cnt
-						//fmt.Printf("CnameChainTest (token = %v) status_update: %v\n", token, fp.MaxCnameDepth)
+			m.Rcode = dns.RcodeNameError
+		}
+		/*
+			labels := strings.Split(subdomain, "-")
+			if labels[0] == "cname" {
+				cname_target = "1-" + subdomain
+			} else {
+				iter_cnt, _ := strconv.Atoi(labels[0])
+				if err == nil {
+					if fp, ok := datastruct.Task_map[token]; ok {
+						if iter_cnt > fp.MaxCnameDepth {
+							fp.MaxCnameDepth = iter_cnt
+							fmt.Printf("CnameChainTest (token = %v) status_update: %v\n", token, fp.MaxCnameDepth)
+						}
 					}
 				}
+				iter_cnt += 1
+				cname_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
+				//cname_target = strings.Join([]string{labels[0], labels[1], strconv.Itoa(iter_cnt)}, "-")
 			}
-			iter_cnt += 1
-			cname_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
-			//cname_target = strings.Join([]string{labels[0], labels[1], strconv.Itoa(iter_cnt)}, "-")
-		}
-		cname_target = dns.Fqdn(cname_target + "." + CONFIG_SLD)
-		cname_redir := &dns.CNAME{
-			Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
-			Target: cname_target,
-		}
-		m.Answer = append(m.Answer, cname_redir)
+			cname_target = dns.Fqdn(cname_target + "." + CONFIG_SLD)
+			cname_redir := &dns.CNAME{
+				Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+				Target: cname_target,
+			}
+			m.Answer = append(m.Answer, cname_redir)
+		*/
 	case 10:
 		var ns_target string
 		token, err := retrieve_token(subdomain)
-		labels := strings.Split(subdomain, "-")
-		if labels[0] == "ns" {
-			ns_target = "1-" + subdomain
+		if err == nil {
+			if fp, ok := datastruct.Task_map[token]; ok {
+				labels := strings.Split(subdomain, "-")
+				if labels[0] == "ns" {
+					ns_target = "1-" + subdomain
+				} else {
+					iter_cnt, err := strconv.Atoi(labels[0])
+					if err == nil {
+						if iter_cnt > fp.MaxNsDepth {
+							fp.MaxNsDepth = iter_cnt
+							fmt.Printf("NsChainTest (token = %v) status_update: %v\n", token, fp.MaxNsDepth)
+						}
+					}
+					iter_cnt += 1
+					ns_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
+				}
+				ns_target = dns.Fqdn(ns_target + "." + CONFIG_SLD)
+				ns_delegation := &dns.NS{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
+					Ns:  ns_target,
+				}
+				m.Ns = append(m.Ns, ns_delegation)
+			} else {
+				m.Rcode = dns.RcodeNameError
+			}
 		} else {
-			iter_cnt, _ := strconv.Atoi(labels[0])
-			if err == nil {
-				if fp, ok := datastruct.Task_map[token]; ok {
-					if iter_cnt > fp.MaxNsDepth {
-						fp.MaxNsDepth = iter_cnt
-						//fmt.Printf("NsChainTest (token = %v) status_update: %v\n", token, fp.MaxNsDepth)
+			m.Rcode = dns.RcodeNameError
+		}
+		/*
+			labels := strings.Split(subdomain, "-")
+			if labels[0] == "ns" {
+				ns_target = "1-" + subdomain
+			} else {
+				iter_cnt, _ := strconv.Atoi(labels[0])
+				if err == nil {
+					if fp, ok := datastruct.Task_map[token]; ok {
+						if iter_cnt > fp.MaxNsDepth {
+							fp.MaxNsDepth = iter_cnt
+							fmt.Printf("NsChainTest (token = %v) status_update: %v\n", token, fp.MaxNsDepth)
+						}
 					}
 				}
+				iter_cnt += 1
+				ns_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
+				//ns_target = strings.Join([]string{labels[0], labels[1], strconv.Itoa(iter_cnt)}, "-")
 			}
-			iter_cnt += 1
-			ns_target = strconv.Itoa(iter_cnt) + "-" + strings.Join(labels[1:], "-")
-			//ns_target = strings.Join([]string{labels[0], labels[1], strconv.Itoa(iter_cnt)}, "-")
-		}
-		ns_target = dns.Fqdn(ns_target + "." + CONFIG_SLD)
-		ns_delegation := &dns.NS{
-			Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
-			Ns:  ns_target,
-		}
-		m.Ns = append(m.Ns, ns_delegation)
+			ns_target = dns.Fqdn(ns_target + "." + CONFIG_SLD)
+			ns_delegation := &dns.NS{
+				Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
+				Ns:  ns_target,
+			}
+			m.Ns = append(m.Ns, ns_delegation)
+		*/
 	case 11:
 		respond_flag = false
 		token, err := retrieve_token(subdomain)
@@ -273,7 +337,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		if fp, ok := datastruct.Task_map[token]; ok {
 			fp.RetryLimit += 1
-			//fmt.Printf("RetryTest (token = %v) current_status: %v\n", token, fp.RetryLimit)
+			fmt.Printf("RetryTest (token = %v) current_status: %v\n", token, fp.RetryLimit)
 		}
 	case 12:
 		respond_flag = false
@@ -284,10 +348,36 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 		if fp, ok := datastruct.Task_map[token]; ok {
 			if fp.TimeoutStart == 0 {
 				fp.TimeoutStart = time.Now().UnixMilli()
-				//fmt.Printf("TimeoutTest (token = %v) start_timestamp: %v\n", token, fp.TimeoutStart)
+				fmt.Printf("TimeoutTest (token = %v) start_timestamp: %v\n", token, fp.TimeoutStart)
 			} else {
 				fp.TimeoutEnd = time.Now().UnixMilli()
-				//fmt.Printf("TimeoutTest (token = %v) timestamp_update: %v\n", token, fp.TimeoutEnd)
+				fmt.Printf("TimeoutTest (token = %v) timestamp_update: %v\n", token, fp.TimeoutEnd)
+			}
+		}
+	case 13:
+		token, err := retrieve_token(subdomain)
+		if err != nil {
+			break
+		}
+		if fp, ok := datastruct.Task_map[token]; ok {
+			fp.RDbit = true
+		}
+		m.MsgHdr.Rcode = dns.RcodeNameError
+	case 14:
+		token, err := retrieve_token(subdomain)
+		if err != nil {
+			break
+		}
+		if fp, ok := datastruct.Task_map[token]; ok {
+			fp.MaxQueryNum += 1
+			fmt.Printf("MaxQueryNum (token = %v) timestamp_update: %v\n", token, fp.TimeoutEnd)
+			for i := 0; i < 10; i++ {
+				ns_target := dns.Fqdn(strconv.Itoa(i) + subdomain + "." + CONFIG_SLD)
+				ns_delegation := &dns.NS{
+					Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 60},
+					Ns:  ns_target,
+				}
+				m.Ns = append(m.Ns, ns_delegation)
 			}
 		}
 	case 0:
