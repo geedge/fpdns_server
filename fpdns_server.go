@@ -229,7 +229,7 @@ func query_handler(w dns.ResponseWriter, r *dns.Msg) {
 					iter_cnt, err := strconv.Atoi(labels[0])
 					if err == nil {
 						if iter_cnt > fp.MaxNsDepth {
-							fp.MaxNsDepth = iter_cnt
+							fp.MaxCnameDepth = iter_cnt
 							fmt.Printf("CnameChainTest (token = %v) status_update: %v\n", token, fp.MaxCnameDepth)
 						}
 					}
